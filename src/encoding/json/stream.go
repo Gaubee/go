@@ -7,6 +7,7 @@ package json
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 )
 
@@ -48,12 +49,7 @@ func (dec *Decoder) DisallowUnknownFields() { dec.d.disallowUnknownFields = true
 // the conversion of JSON into a Go value.
 func (dec *Decoder) Decode(v interface{}) error {
 	if dec.err != nil {
-		// if can refill, like by buf.write(newDate), then can keep going to Decode
-		if dec.err == io.EOF && dec.refill() == nil {
-			dec.err = nil
-		} else {
-			return dec.err
-		}
+		return dec.err
 	}
 
 	if err := dec.tokenPrepareForDecode(); err != nil {
@@ -169,6 +165,23 @@ func (dec *Decoder) refill() error {
 	// Read. Delay error for next iteration (after scan).
 	n, err := dec.r.Read(dec.buf[len(dec.buf):cap(dec.buf)])
 	dec.buf = dec.buf[0 : len(dec.buf)+n]
+
+	return err
+}
+
+// Manually try to fill the data
+func (dec *Decoder) Refill() error {
+	// Is it necessary
+	if dec.scanp < len(dec.buf) {
+		dec.err = nil
+		return nil
+	}
+
+	err := dec.refill()
+	// if success refill, then remove eof error
+	if (dec.err == io.EOF || dec.err == io.ErrUnexpectedEOF) && err == nil {
+		dec.err = nil
+	}
 
 	return err
 }
