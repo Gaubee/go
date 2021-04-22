@@ -45,7 +45,7 @@
 		global.fs = {
 			constants: { O_WRONLY: -1, O_RDWR: -1, O_CREAT: -1, O_TRUNC: -1, O_APPEND: -1, O_EXCL: -1 }, // unused
 			writeSync(fd, buf) {
-				outputBuf += decoder.decode(buf);
+				outputBuf += buf.byteLength > 200 ? decoder.decode(buf) : decode(buf, buf.byteOffset, buf.byteOffset + buf.byteLength);
 				const nl = outputBuf.lastIndexOf("\n");
 				if (nl != -1) {
 					console.log(outputBuf.substr(0, nl));
@@ -141,6 +141,54 @@
 
 	const encoder = new TextEncoder("utf-8");
 	const decoder = new TextDecoder("utf-8");
+
+	const decode = (octets, start, end) => {
+		let string = "";
+		let octet = 0;
+		let codePoint = 0;
+		const lastOffset1 = end - 1;
+		const lastOffset2 = end - 2;
+		const lastOffset3 = end - 3;
+		for (let i = start; i < end; ++i) {
+		  octet = octets[i];
+		  codePoint = 0;
+		  if (octet <= 0x7f) {
+			codePoint = octet & 0xff;
+		  } else if (octet <= 0xdf) {
+			if (lastOffset1 - i > 0) {
+			  codePoint = ((octet & 0x1f) << 6) | (octets[++i] & 0x3f);
+			} else {
+			  codePoint = 0xfffd;
+			  i = end;
+			}
+		  } else if (octet <= 0xef) {
+			if (lastOffset2 - i > 0) {
+			  codePoint =
+				((octet & 0x0f) << 12) |
+				((octets[++i] & 0x3f) << 6) |
+				(octets[++i] & 0x3f);
+			} else {
+			  codePoint = 0xfffd;
+			  i = end;
+			}
+		  } else if (octet <= 0xf4) {
+			if (lastOffset3 - i > 0) {
+			  codePoint =
+				((octet & 0x07) << 18) |
+				((octets[++i] & 0x3f) << 12) |
+				((octets[++i] & 0x3f) << 6) |
+				octets[++i];
+			} else {
+			  codePoint = 0xfffd;
+			  i = end;
+			}
+		  }
+	  
+		  string += String.fromCodePoint(codePoint);
+		}
+		return string;
+	};
+
 
 	global.Go = class {
 		constructor() {
@@ -248,10 +296,16 @@
 				return a;
 			}
 
+			let ab = 0
 			const loadString = (addr) => {
 				const saddr = getInt64(addr + 0);
 				const len = getInt64(addr + 8);
-				return decoder.decode(new DataView(this._inst.exports.mem.buffer, saddr, len));
+				// bytes decode to utf8, use javascript is faster then native
+				if (len>200) {
+					return decoder.decode(new Uint8Array(this._inst.exports.mem.buffer, saddr, len));
+				} else {
+					return decode(this.mem_u8, saddr, saddr + len);
+				}
 			}
 
 			const timeOrigin = Date.now() - performance.now();
@@ -288,6 +342,7 @@
 					"runtime.resetMemoryDataView": (sp) => {
 						sp >>>= 0;
 						this.mem = new DataView(this._inst.exports.mem.buffer);
+						this.mem_u8 = new Uint8Array(this._inst.exports.mem.buffer);
 					},
 
 					// func nanotime1() int64
@@ -360,7 +415,8 @@
 					// func valueGet(v ref, p string) ref
 					"syscall/js.valueGet": (sp) => {
 						sp >>>= 0;
-						const result = Reflect.get(loadValue(sp + 8), loadString(sp + 16));
+						const result = loadValue(sp + 8)[loadString(sp + 16)];
+						// Reflect.get(loadValue(sp + 8), loadString(sp + 16));
 						sp = this._inst.exports.getsp() >>> 0; // see comment above
 						storeValue(sp + 32, result);
 					},
@@ -368,25 +424,28 @@
 					// func valueSet(v ref, p string, x ref)
 					"syscall/js.valueSet": (sp) => {
 						sp >>>= 0;
-						Reflect.set(loadValue(sp + 8), loadString(sp + 16), loadValue(sp + 32));
+						loadValue(sp + 8)[loadString(sp + 16)] = loadValue(sp + 32);
+						// Reflect.set(loadValue(sp + 8), loadString(sp + 16), loadValue(sp + 32));
 					},
 
 					// func valueDelete(v ref, p string)
 					"syscall/js.valueDelete": (sp) => {
 						sp >>>= 0;
-						Reflect.deleteProperty(loadValue(sp + 8), loadString(sp + 16));
+						delete loadValue(sp + 8)[loadString(sp + 16)]
+						// Reflect.deleteProperty(loadValue(sp + 8), loadString(sp + 16));
 					},
 
 					// func valueIndex(v ref, i int) ref
 					"syscall/js.valueIndex": (sp) => {
 						sp >>>= 0;
-						storeValue(sp + 24, Reflect.get(loadValue(sp + 8), getInt64(sp + 16)));
+						storeValue(sp + 24, loadValue(sp + 8)[getInt64(sp + 16)] /* Reflect.get(loadValue(sp + 8), getInt64(sp + 16)) */);
 					},
 
 					// valueSetIndex(v ref, i int, x ref)
 					"syscall/js.valueSetIndex": (sp) => {
 						sp >>>= 0;
-						Reflect.set(loadValue(sp + 8), getInt64(sp + 16), loadValue(sp + 24));
+						loadValue(sp + 8)[getInt64(sp + 16)] = loadValue(sp + 24)
+						// Reflect.set(loadValue(sp + 8), getInt64(sp + 16), loadValue(sp + 24));
 					},
 
 					// func valueCall(v ref, m string, args []ref) (ref, bool)
@@ -394,9 +453,9 @@
 						sp >>>= 0;
 						try {
 							const v = loadValue(sp + 8);
-							const m = Reflect.get(v, loadString(sp + 16));
+							const m = v[loadString(sp + 16)]; // Reflect.get(v, loadString(sp + 16));
 							const args = loadSliceOfValues(sp + 32);
-							const result = Reflect.apply(m, v, args);
+							const result = m.apply(v,args); // Reflect.apply(m, v, args);
 							sp = this._inst.exports.getsp() >>> 0; // see comment above
 							storeValue(sp + 56, result);
 							this.mem.setUint8(sp + 64, 1);
@@ -412,7 +471,7 @@
 						try {
 							const v = loadValue(sp + 8);
 							const args = loadSliceOfValues(sp + 16);
-							const result = Reflect.apply(v, undefined, args);
+							const result = v.apply(undefined, args); // Reflect.apply(v, undefined, args);
 							sp = this._inst.exports.getsp() >>> 0; // see comment above
 							storeValue(sp + 40, result);
 							this.mem.setUint8(sp + 48, 1);
@@ -516,6 +575,7 @@
 			}
 			this._inst = instance;
 			this.mem = new DataView(this._inst.exports.mem.buffer);
+			this.mem_u8 = new Uint8Array(this._inst.exports.mem.buffer);
 			this._values = [ // JS values that Go currently has references to, indexed by reference id
 				NaN,
 				0,
